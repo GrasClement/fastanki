@@ -9,17 +9,6 @@ from anki.collection import Collection as AnkiCollection
 
 pytestmark = pytest.mark.timeout(120)
 
-@pytest.fixture
-def server():
-    base = tempfile.mkdtemp()
-    proc, ep = start_sync_server(base)
-    try: yield ep
-    finally:
-        proc.terminate()
-        try: proc.wait(timeout=10)
-        except subprocess.TimeoutExpired: proc.kill(); proc.wait()
-        shutil.rmtree(base, ignore_errors=True)
-
 def test_round_trip(server, tmp_path):
     ep = server
     col = Collection.open(tmp_path/'ours'/'collection.anki2')
