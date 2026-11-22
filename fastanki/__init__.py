@@ -10,3 +10,4 @@ from .syncer import *
 from .media import *
 from .core import *
 from .apkg import *
+from .study import *
