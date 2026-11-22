@@ -11,6 +11,8 @@ This is an nbdev project. The notebooks in `nbs/` are the source of truth, and `
 - `02_syncer.ipynb` (`syncer.py`): the AnkiWeb client. Login, the delta sync state machine, schema 11 conversions, full upload and download, and auth storage.
 - `03_core.ipynb` (`core.py`): the functional API (`add_card`, `find_notes`, `sync`, etc). Each function opens the default collection, does its work, and closes. `anki_tools` exposes these as LLM tools.
 - `04_media.ipynb` (`media.py`): media files and the media sync protocol. Filename normalization, the media db and folder scan, the zip wire format, and the media sync state machine.
+- `05_apkg.ipynb` (`apkg.py`): `Collection.import_apkg`, which merges a genanki-style `.apkg` into the collection, matching notes by guid.
+- `06_study.ipynb` (`study.py`): read-only access to review history and card scheduling state (`reviews`, `card_states`, `revlog_csv`).
 
 `fastanki/_proto/` is not generated from a notebook. It vendors Anki's protobuf messages as serialized descriptors (`descriptors.binpb`), loaded at import into a private descriptor pool and exposed as module-shaped namespaces (`notetypes_pb2` etc), so the `anki` wheel's own registrations in the default pool never clash whatever version is installed. When an Anki update changes a proto we use, run `from fastanki._proto import refresh; refresh()` to re-dump the blob from the installed wheel. `tests/test_sync.py` is the end to end sync test, described below. `anki/` (gitignored) is a clone of the Anki source, kept for reference. When a protocol question comes up, the answer is in `anki/rslib/src/sync/`.
 
@@ -38,6 +40,8 @@ The `anki` package is a dev dependency and the tests use it as a reference imple
 
 `tests/test_sync.py` covers sync end to end without touching the real AnkiWeb. The `anki` wheel includes AnkiWeb's protocol front end (media endpoints included), so `start_sync_server` in `syncer.py` launches `python -m anki.syncserver` on a free port; the pytest fixture and the notebooks' story cells both use it. Our client uploads, Anki logs in as a second client and verifies every note, tag, and deck, then edits and deletes and syncs the deltas back, and the same happens in reverse. Media gets the same treatment: bytes round-trip through Anki's media sync in both directions, deletions and same-name conflicts propagate, batching is exercised past the 25-file zip limit, and a count-check failure recovers. `pytest-timeout` bounds the whole run.
 
+`tests/test_apkg.py` covers `import_apkg` on its own, and `tests/test_study.py` drives the whole path against the local sync server, with the `anki` client as a phone that answers cards: its reviews must reach `reviews()` by delta sync, and editing a published deck must keep them.
+
 Run `pytest` for the sync test and `nbdev-test` for the notebooks. Cells that need a server process or AnkiWeb credentials are marked `eval: false` so CI and doc builds skip them, and no committed cell contains real credentials.
 
 ## Gotchas and Anki internals
@@ -58,6 +62,10 @@ Hard-won facts worth keeping. When a protocol question comes up the answer is in
 - After a media upload, adopt the server's usn only if `lastUsn + files_sent == current_usn`; anything else means another client uploaded concurrently and the next fetch must see their rows (`syncer.rs`).
 - Anki's add-media-uniquely lowercases: a fresh uppercase filename is stored lowercased, but the same-name-same-content check runs against the original case first, so on a case-insensitive filesystem re-adding `Foo.jpg` returns `Foo.jpg` while Linux returns `foo.jpg`. Don't pin the mixed-case result in a test.
 - A failed `mediaSanity` count check (deleted entries excluded) clears the whole media db so the next sync re-lists against the server; media has no full-sync path, so this is its only recovery mechanism.
+
+- `.apkg` notes match on guid, but sync matches on id. A package rebuilt by genanki has new note ids every time, so `import_apkg` must look notes up by guid, or each rebuild would add a duplicate of every note. The ids stay whatever the first import allocated.
+- A schema change (fields or templates added, removed or reordered in a notetype) can't travel as a delta: the server answers `applyChanges` with a 400. `import_apkg` bumps `scm` (and `mod`, through `_dirty`), so `sync` raises a full sync. Publish it with `sync(upload=True)`: a bare `sync()` takes the *download* branch and replaces the freshly imported local file with the server copy. Since a full upload replaces the server copy, `sync()` first so that reviews done on other devices are in the local file, and a phone that holds unsynced reviews should sync before the upload.
+- Deck names are stored with `\x1f` between levels, whatever the `::` shown in the app.
 
 ## Not implemented
 
