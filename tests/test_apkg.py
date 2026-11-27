@@ -111,3 +111,19 @@ def test_modern_apkg_is_refused(tmp_path):
     p = tmp_path/'m.apkg'
     with zipfile.ZipFile(p, 'w') as z: z.writestr('collection.anki21b', b'x'); z.writestr('meta', b'')
     with Collection.open(tmp_path/'c.anki2') as col, pytest.raises(ValueError, match='modern'): col.import_apkg(p)
+
+def test_deck_of_same_name_under_another_id_is_adopted(tmp_path):
+    "Anki's importer gives decks fresh ids: a package deck whose name exists locally under another id is adopted, not inserted."
+    with Collection.open(tmp_path/'c.anki2') as col:
+        col.import_apkg(build(tmp_path/'a.apkg', deck_name='Maths', deck_id=1111))  # as if the app had imported it
+        st = col.import_apkg(build(tmp_path/'b.apkg', deck_name='Maths', deck_id=2222))
+        assert (st['decks_matched'], st['decks_new'], st['cards_moved'], st['cards_new']) == (1, 0, 0, 0)
+        assert col.decks() == ['Default', 'Maths'] and col.q1('select id from decks where name=?', 'Maths') == 1111
+        # then a sub-deck: cards move into it, the parent keeps its local id
+        st = col.import_apkg(build(tmp_path/'c.apkg', deck_name='Maths::Chap', deck_id=3333))
+        assert (st['decks_new'], st['cards_moved']) == (1, 3)
+        assert {r[0] for r in col.q('select did from cards')} == {3333}
+        # sub-deck already made in the app under its own id: adopted too
+        col.con.execute('update decks set id=4444 where id=3333'); col.con.execute('update cards set did=4444')
+        st = col.import_apkg(build(tmp_path/'d.apkg', verso='v2', deck_name='Maths::Chap', deck_id=3333))
+        assert (st['decks_matched'], st['cards_moved'], st['notes_updated']) == (1, 0, 1)

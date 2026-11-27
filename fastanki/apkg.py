@@ -38,22 +38,26 @@ def _upsert_model(col, m, now_s):
 
 # %% ../nbs/05_apkg.ipynb #07dd727b
 def _upsert_deck(col, d, now_s):
-    "Create deck `d` (schema 11 dict) or rename it; returns `'new'`, `'renamed'` or `None`"
+    """Create deck `d` (schema 11 dict), rename it, or adopt the local deck of the same name.
+    Returns (`'new'`|`'renamed'`|`'matched'`|`None`, local deck id). Anki's own importer gives decks new ids,
+    so a collection filled by the app holds the package's decks by name under other ids; deck names are unique."""
     did,name = int(d['id']), d['name'].replace('::','\x1f')
     cur = col.q1('select name from decks where id=?', did)
     if cur is None:
+        if other := col.q1('select id from decks where name=?', name): return 'matched',other
         col.con.execute('insert into decks values (?,?,?,?,?,?)', deck_from_s11(dict(d, usn=-1, mod=now_s)))
-        return 'new'
-    if did!=1 and cur!=name:
+        return 'new',did
+    if did!=1 and cur!=name and not col.q1('select 1 from decks where name=? and id!=?', name, did):
         col.con.execute('update decks set name=?, mtime_secs=?, usn=-1 where id=?', (name, now_s, did))
-        return 'renamed' 
+        return 'renamed',did
+    return None,did
 
 # %% ../nbs/05_apkg.ipynb #74d92f58
 @patch
 def import_apkg(self:Collection, apkg):
     "Import the genanki-style `.apkg` at `apkg`, matching notes by guid; returns a dict of counts"
     st = dict(notes_new=0, notes_updated=0, notes_same=0, cards_new=0, cards_moved=0, models_new=0, models_changed=0,
-              decks_new=0, decks_renamed=0, media=0, schema_changed=False)
+              decks_new=0, decks_renamed=0, decks_matched=0, media=0, schema_changed=False)
     now_s = now_ms()//1000
     with tempfile.TemporaryDirectory() as tmp, zipfile.ZipFile(apkg) as z:
         names = z.namelist()
@@ -77,8 +81,10 @@ def import_apkg(self:Collection, apkg):
             status,schema = _upsert_model(self, m, now_s)
             if status!='same': st[f'models_{status}'] += 1
             st['schema_changed'] |= schema
-        for d in decks.values():
-            if r := _upsert_deck(self, d, now_s): st[f'decks_{r}'] += 1
+        dmap = {}
+        for d in sorted(decks.values(), key=lambda d: d['name'].count('::')):  # parents before children
+            r,dmap[int(d['id'])] = _upsert_deck(self, d, now_s)
+            if r: st[f'decks_{r}'] += 1
         for src_id,guid,mid,tags,flds in notes:
             vals = flds.split('\x1f')
             sfld,csum = strip_html_media(vals[int(models[str(mid)]['sortf'])]), field_csum(vals[0])
@@ -94,6 +100,7 @@ def import_apkg(self:Collection, apkg):
                     self.con.execute('update notes set flds=?, tags=?, sfld=?, csum=?, mod=?, usn=-1 where id=?', (flds, tags, sfld, csum, now_s, nid))
                     st['notes_updated'] += 1
             for ord_,did in by_note.get(src_id, []):
+                did = dmap.get(did, did)
                 cur = self.con.execute('select id, did, odid from cards where nid=? and ord=?', (nid, ord_)).fetchone()
                 if cur:
                     if cur[1]!=did and not cur[2]:  # odid set: card sits in a filtered deck, leave it
